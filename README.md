@@ -144,8 +144,8 @@ Requires Java 21 and an internet connection to download dependencies.
 
 ## Links
 
-- [Hangar (PaperMC)](https://hangar.papermc.io/trazhub/VoxelPort) — download
-- [Modrinth](https://modrinth.com/plugin/voxelport) — download
+- [Hangar (PaperMC)](https://hangar.papermc.io/voxelportt/VoxelPort) — download
+- [Modrinth](https://modrinth.com/plugin/voxelportplugin) — download
 - [Discord](https://discord.gg/EuDMWUuGpp) — get your token, support, updates
 - [VoxelPort Fabric Mod](https://github.com/trazhub/VoxelPort) — for sharing singleplayer worlds
 
