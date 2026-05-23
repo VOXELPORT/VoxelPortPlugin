@@ -41,7 +41,7 @@ Join the [VoxelPort Discord](https://discord.gg/EuDMWUuGpp) and run `/gettoken` 
 
 ### 2. Install the plugin
 
-Download `voxelport-plugin.jar` from [Hangar](https://hangar.papermc.io/trazhub/VoxelPort) and drop it into your server's `plugins/` folder.
+Download `voxelport-plugin.jar` from [Hangar](https://hangar.papermc.io/voxelportt/VoxelPort) and drop it into your server's `plugins/` folder.
 
 ### 3. Configure
 
