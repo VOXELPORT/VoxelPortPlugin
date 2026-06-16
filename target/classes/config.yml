@@ -1,9 +1,0 @@
-# VoxelPort Plugin Config
-# Get your server token from the VoxelPort Discord bot with /gettoken
-
-relay-ws: wss://voxelportrelay.qzz.io:2526
-server-token: YOUR_TOKEN_HERE
-
-# The local Minecraft server address this plugin connects to internally
-server-host: localhost
-server-port: 25565

@@ -12,8 +12,9 @@ public class VoxelPortPlugin extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
 
-        String relayWs    = getConfig().getString("relay-ws",     "ws://voxelportrelay.qzz.io:2526");
+        String relayWs    = getConfig().getString("relay-ws",     "wss://voxelport.in");
         String token      = getConfig().getString("server-token", "");
+        String publicHost = getConfig().getString("public-host",  "play.voxelport.in");
         String serverHost = getConfig().getString("server-host",  "localhost");
         int    serverPort = getConfig().getInt   ("server-port",  25565);
 
@@ -23,7 +24,11 @@ public class VoxelPortPlugin extends JavaPlugin {
             return;
         }
 
-        relayClient = new RelayClient(this, relayWs, token, serverHost, serverPort);
+        if (relayWs.startsWith("ws://")) {
+            getLogger().warning("relay-ws uses ws:// (unencrypted) — your token is sent in plaintext. Use wss:// in production.");
+        }
+
+        relayClient = new RelayClient(this, relayWs, token, publicHost, serverHost, serverPort);
         relayClient.connect();
         getLogger().info("Connecting to VoxelPort relay...");
     }
@@ -47,7 +52,7 @@ public class VoxelPortPlugin extends JavaPlugin {
 
             sender.sendMessage("§a[VoxelPort] §fStatus: " + (connected ? "§aConnected" : "§cDisconnected"));
             if (ready) {
-                sender.sendMessage("§a[VoxelPort] §fPlayers connect via: §bvoxelportrelay.qzz.io:" + port);
+                sender.sendMessage("§a[VoxelPort] §fPlayers connect via: §b" + relayClient.getPublicAddress());
             } else if (connected) {
                 sender.sendMessage("§a[VoxelPort] §fWaiting for port assignment...");
             }
@@ -58,8 +63,9 @@ public class VoxelPortPlugin extends JavaPlugin {
             if (relayClient != null) relayClient.disconnect();
             reloadConfig();
 
-            String relayWs    = getConfig().getString("relay-ws",     "ws://voxelportrelay.qzz.io:2526");
+            String relayWs    = getConfig().getString("relay-ws",     "wss://voxelport.in");
             String token      = getConfig().getString("server-token", "");
+            String publicHost = getConfig().getString("public-host",  "play.voxelport.in");
             String serverHost = getConfig().getString("server-host",  "localhost");
             int    serverPort = getConfig().getInt   ("server-port",  25565);
 
@@ -68,7 +74,7 @@ public class VoxelPortPlugin extends JavaPlugin {
                 return true;
             }
 
-            relayClient = new RelayClient(this, relayWs, token, serverHost, serverPort);
+            relayClient = new RelayClient(this, relayWs, token, publicHost, serverHost, serverPort);
             relayClient.connect();
             sender.sendMessage("§a[VoxelPort] §fReloaded and reconnecting...");
             return true;

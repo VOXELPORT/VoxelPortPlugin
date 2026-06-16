@@ -1,8 +1,18 @@
 # VoxelPort Plugin Config
 # Get your server token from the VoxelPort Discord bot with /gettoken
 
-relay-ws: ws://voxelportrelay.qzz.io:2526
+# Secure WebSocket address of the VoxelPort relay (wss:// = encrypted).
+# Only use ws:// (unencrypted) for local testing — never over the internet,
+# because your token would travel in plaintext.
+relay-ws: wss://voxelport.in
+
+# Your server token — get one from the VoxelPort Discord with /gettoken.
+# Treat this like a password: do NOT share it, screenshot it, or commit it
+# to a public repository.
 server-token: YOUR_TOKEN_HERE
+
+# The public address players type into Minecraft (shown by /voxelport status).
+public-host: play.voxelport.in
 
 # The local Minecraft server this plugin proxies traffic to
 server-host: localhost
