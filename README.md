@@ -35,9 +35,13 @@ The plugin handles everything. Your server never needs an open port.
 
 ## Installation
 
+Need a full beginner guide? See [Setup Guide and FAQ](docs/SETUP_AND_FAQ.md)
+for Java/JDK installation, creating a Paper server, VoxelPort setup,
+troubleshooting, and common questions.
+
 ### 1. Get a token
 
-Join the [VoxelPort Discord](https://discord.gg/EuDMWUuGpp) and run `/gettoken` in any channel. Copy the token you receive.
+Join the [VoxelPort Discord](https://discord.gg/Fbqx76j5US) and run `/gettoken` in any channel. Copy the token you receive.
 
 ### 2. Install the plugin
 
@@ -78,10 +82,13 @@ Share that address. Done.
 
 | Command | Permission | Description |
 |---------|------------|-------------|
-| `/voxelport status` | `voxelport.admin` | Shows connection status and current join address |
+| `/voxelport status` | `voxelport.bypass` or `voxelport.admin` | Shows connection status and current join address |
 | `/voxelport reload` | `voxelport.admin` | Reloads config.yml and reconnects to the relay |
+| `/voxelport reconnect` | `voxelport.admin` | Forces a relay reconnect |
+| `/voxelport stats` | `voxelport.admin` | Shows active connections, uptime, and traffic counters |
 
-Both commands require operator or the `voxelport.admin` permission node.
+Operators have `voxelport.admin` by default. Grant `voxelport.bypass` only if
+you want someone to view status without admin controls.
 
 ---
 
@@ -130,8 +137,8 @@ The plugin auto-reconnects every 10 seconds if the relay connection drops. It ca
 **Token rejected by relay**
 → The token may have been revoked. Run `/revoketoken` then `/gettoken` again in the Discord, update config.yml, and run `/voxelport reload`.
 
-**Address changes every restart**
-→ Expected behavior. The relay assigns a port when the plugin connects. Run `/voxelport status` after each restart and share the new address.
+**Address changed unexpectedly**
+→ VoxelPort tokens are intended to keep a stable assigned port. Make sure you are using the same Discord account/token owner, then run `/voxelport status` and share the latest address. Ask in Discord if you believe the stable port was lost.
 
 ---
 
@@ -153,7 +160,7 @@ Requires Java 21 and an internet connection to download dependencies.
 
 - [Hangar (PaperMC)](https://hangar.papermc.io/voxelportt/VoxelPort) — download
 - [Modrinth](https://modrinth.com/plugin/voxelportplugin) — download
-- [Discord](https://discord.gg/EuDMWUuGpp) — get your token, support, updates
+- [Discord](https://discord.gg/Fbqx76j5US) — get your token, support, updates
 - [VoxelPort Fabric Mod](https://github.com/trazhub/VoxelPort) — for sharing singleplayer worlds
 
 ---
