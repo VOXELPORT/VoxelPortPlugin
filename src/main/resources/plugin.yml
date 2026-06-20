@@ -1,5 +1,5 @@
 name: VoxelPort
-version: '1.0.0'
+version: '1.2.0'
 main: io.voxelport.plugin.VoxelPortPlugin
 api-version: '1.21'
 description: Host your Paper server without port forwarding via VoxelPort relay
@@ -8,10 +8,15 @@ authors: [trazhub]
 commands:
   voxelport:
     description: VoxelPort status and controls
-    usage: /voxelport [status|reload]
-    permission: voxelport.admin
+    usage: /voxelport [status|reload|reconnect|stats]
+    permission: voxelport.bypass
 
 permissions:
   voxelport.admin:
-    description: Access VoxelPort commands
+    description: Full access to all VoxelPort commands (reload, reconnect, stats, maintenance)
     default: op
+    children:
+      voxelport.bypass: true
+  voxelport.bypass:
+    description: Read-only access — allows /voxelport status only
+    default: false

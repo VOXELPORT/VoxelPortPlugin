@@ -16,104 +16,158 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 public class RelayClient extends WebSocketClient {
 
-    /** Hard cap on simultaneous proxied connections. Protects the local server
-     *  from resource exhaustion if the relay misbehaves or is compromised. */
-    private static final int MAX_CONNECTIONS = 200;
+    // ---------------------------------------------------------------------------
+    // Config
 
-    /** Reject oversized data frames before allocating/decoding them.
-     *  Legitimate Minecraft packet chunks fit comfortably under this. */
-    private static final int MAX_FRAME_BASE64_CHARS = 2 * 1024 * 1024; // ~1.5 MB decoded
+    /** Immutable config bundle passed from VoxelPortPlugin. */
+    public static final class Config {
+        final String relayWs;
+        final String token;
+        final String publicHost;
+        final String serverHost;
+        final int    serverPort;
+        final int    maxConnections;
+        final int    reconnectBaseDelay; // seconds
+        final int    reconnectMaxDelay;  // seconds
+        final int    reconnectJitter;    // seconds of random jitter added each backoff step
+
+        public Config(String relayWs, String token, String publicHost,
+                      String serverHost, int serverPort, int maxConnections,
+                      int reconnectBaseDelay, int reconnectMaxDelay, int reconnectJitter) {
+            this.relayWs            = relayWs;
+            this.token              = token;
+            this.publicHost         = publicHost;
+            this.serverHost         = serverHost;
+            this.serverPort         = serverPort;
+            this.maxConnections     = maxConnections;
+            this.reconnectBaseDelay = Math.max(1, reconnectBaseDelay);
+            this.reconnectMaxDelay  = Math.max(this.reconnectBaseDelay, reconnectMaxDelay);
+            this.reconnectJitter    = Math.max(0, reconnectJitter);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Constants
+
+    /** Reject frames larger than this before allocating/decoding them. */
+    private static final int MAX_FRAME_BASE64_CHARS = 2 * 1024 * 1024;
     private static final int MAX_DECODED_FRAME_BYTES = (MAX_FRAME_BASE64_CHARS / 4) * 3;
 
     private static final int LOCAL_CONNECT_TIMEOUT_MS = 5000;
-    private static final int READ_BUFFER_BYTES = 65536;
+    private static final int READ_BUFFER_BYTES        = 65536;
 
-    /** Cap on client bytes buffered before the local socket finishes connecting.
-     *  Must hold at least one relay-accepted frame so a legal frame cannot kill
-     *  a connection merely because the local socket is still connecting. */
+    /**
+     * Cap on bytes buffered for a connection still in the CONNECTING state.
+     * Must hold at least one maximum-size relay frame so a legal first packet
+     * cannot kill a connection that is merely slow to connect locally.
+     */
     private static final int MAX_PENDING_BYTES = MAX_DECODED_FRAME_BYTES;
 
-    private final VoxelPortPlugin plugin;
-    private final String token;
-    private final String publicHost;
-    private final String serverHost;
-    private final int serverPort;
-    private final Logger log;
+    // ---------------------------------------------------------------------------
+    // Fields
 
-    private volatile int assignedPort = -1;
+    private final VoxelPortPlugin plugin;
+    private final Config          cfg;
+    private final Logger          log;
+
+    // Stats counters — updated from IO threads, read from the main thread.
+    private final AtomicLong totalConnections = new AtomicLong();
+    private final AtomicLong bytesFromServer  = new AtomicLong(); // server -> relay -> client
+    private final AtomicLong bytesToServer    = new AtomicLong(); // client -> relay -> server
+
+    private volatile int  assignedPort     = -1;
+    private volatile int  currentBackoff;   // seconds; doubles on each failed attempt
+    /** When true, onClose will not kick players or fire the disconnect callback.
+     *  Set before intentional closes (reload, reconnect command, shutdown). */
+    private volatile boolean suppressDisconnectEvent = false;
+
+    // Latency tracking: nanoTime when the last ping was sent; -1 until first pong.
+    private volatile long lastPingSentNanos = 0L;
+    private volatile long latencyMs        = -1L;
+
     private final ConcurrentHashMap<String, PlayerConn> connections = new ConcurrentHashMap<>();
 
-    /** State for one proxied player. The local socket is opened asynchronously,
-     *  so data may arrive from the relay before it is ready; that data is buffered
-     *  in {@code pending} and flushed once the socket is ready. */
+    // ---------------------------------------------------------------------------
+    // PlayerConn — state for one proxied player connection
+
+    /** State for one proxied player. The local socket is opened asynchronously. */
     private static final class PlayerConn {
-        State state = State.CONNECTING;
-        Socket socket;
+        State      state = State.CONNECTING;
+        Socket     socket;
         OutputStream output;
-        boolean relayInitiatedClose;
+        boolean    relayInitiatedClose;
         final java.util.ArrayDeque<byte[]> pending = new java.util.ArrayDeque<>();
-        int pendingBytes;
+        int        pendingBytes;
     }
 
-    private enum State {
-        CONNECTING,
-        OPEN,
-        CLOSED
-    }
+    private enum State { CONNECTING, OPEN, CLOSED }
 
-    // Single-threaded scheduler purely for heartbeat + reconnect timing.
+    // ---------------------------------------------------------------------------
+    // Thread pools
+
+    /** Single-threaded scheduler for heartbeat + reconnect timing. */
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(namedFactory("voxelport-sched"));
-    // Per-connection pump threads. Each proxied player holds one thread for the
-    // lifetime of its connection, so this must grow on demand, never a fixed pool.
+
+    /**
+     * Per-connection pump threads. Each proxied player holds one thread for the
+     * duration of their connection, so this must grow on demand.
+     */
     private final ExecutorService ioPool =
             Executors.newCachedThreadPool(namedFactory("voxelport-io"));
 
     private ScheduledFuture<?> pingTask;
 
-    public RelayClient(VoxelPortPlugin plugin, String relayWs, String token,
-                       String publicHost, String serverHost, int serverPort) {
-        super(URI.create(relayWs));
-        this.plugin     = plugin;
-        this.token      = token;
-        this.publicHost = publicHost;
-        this.serverHost = serverHost;
-        this.serverPort = serverPort;
-        this.log        = plugin.getLogger();
+    // ---------------------------------------------------------------------------
+    // Constructor
+
+    public RelayClient(VoxelPortPlugin plugin, Config cfg) {
+        super(URI.create(cfg.relayWs));
+        this.plugin          = plugin;
+        this.cfg             = cfg;
+        this.log             = plugin.getLogger();
+        this.currentBackoff  = cfg.reconnectBaseDelay;
         setConnectionLostTimeout(30);
     }
 
+    // ---------------------------------------------------------------------------
+    // WebSocket lifecycle
+
     @Override
     public void onOpen(ServerHandshake handshake) {
-        assignedPort = -1;
+        assignedPort           = -1;
+        suppressDisconnectEvent = false; // reset so future unexpected drops are reported
+        currentBackoff         = cfg.reconnectBaseDelay; // reset exponential backoff
 
         JsonObject msg = new JsonObject();
         msg.addProperty("type",  "register");
-        msg.addProperty("token", token);
+        msg.addProperty("token", cfg.token);
         send(msg.toString());
 
-        // Cancel any leftover ping task from a previous connection
         if (pingTask != null && !pingTask.isDone()) pingTask.cancel(false);
-
         pingTask = scheduler.scheduleAtFixedRate(() -> {
-            if (isOpen()) send("{\"type\":\"ping\"}");
+            if (isOpen()) {
+                lastPingSentNanos = System.nanoTime();
+                send("{\"type\":\"ping\"}");
+            }
         }, 25, 25, TimeUnit.SECONDS);
     }
 
     @Override
     public void onMessage(String raw) {
-        // Never let a malformed frame escape and tear down the socket.
+        // Never let a malformed frame tear down the WebSocket connection.
         try {
             JsonObject msg = JsonParser.parseString(raw).getAsJsonObject();
             String type = optString(msg, "type");
             if (type == null) return;
 
             switch (type) {
-                case "port": {
+                case "port" -> {
                     int port = optInt(msg, "port", -1);
                     if (port < 0) return;
                     assignedPort = port;
@@ -121,31 +175,30 @@ public class RelayClient extends WebSocketClient {
                     log.info("  VoxelPort is ready!");
                     log.info("  Players connect via: " + getPublicAddress());
                     log.info("==========================================");
-                    break;
+                    plugin.onRelayReady(port);
                 }
-                case "connect": {
+                case "connect" -> {
                     String conn = optString(msg, "conn");
                     if (conn != null) openPlayerConnection(conn);
-                    break;
                 }
-                case "data": {
+                case "data" -> {
                     String conn = optString(msg, "conn");
                     String data = optString(msg, "data");
                     if (conn != null && data != null) forwardToServer(conn, data);
-                    break;
                 }
-                case "close": {
+                case "close" -> {
                     String conn = optString(msg, "conn");
                     if (conn != null) closePlayerConnection(conn);
-                    break;
                 }
-                case "error": {
+                case "pong" -> {
+                    long sent = lastPingSentNanos;
+                    if (sent != 0L) latencyMs = (System.nanoTime() - sent) / 1_000_000L;
+                }
+                case "error" -> {
                     String message = optString(msg, "message");
                     log.warning("Relay error: " + (message != null ? message : "unknown"));
-                    break;
                 }
-                default:
-                    // Unknown frame type: ignore for forward compatibility.
+                // Unknown frame types are silently ignored for forward-compatibility.
             }
         } catch (Exception e) {
             log.warning("Ignoring malformed relay frame: " + e.getMessage());
@@ -157,24 +210,65 @@ public class RelayClient extends WebSocketClient {
         // Not used: relay sends text JSON only.
     }
 
-    // A vanilla Minecraft client connected to the relay port opens a local TCP socket.
+    @Override
+    public void onClose(int code, String reason, boolean remote) {
+        assignedPort = -1;
+        if (pingTask != null) pingTask.cancel(false);
+        closeAllConnections();
+
+        String safeReason = (reason == null || reason.isEmpty()) ? "unknown" : reason;
+
+        if (!suppressDisconnectEvent && plugin.isEnabled()) {
+            plugin.onRelayDisconnected(safeReason);
+        }
+
+        log.warning("Disconnected from relay (" + safeReason + "). Reconnecting in " + currentBackoff + "s...");
+
+        int delay = currentBackoff;
+
+        // Exponential backoff with jitter: delay doubles each attempt, caps at max.
+        int jitter = cfg.reconnectJitter > 0
+                ? ThreadLocalRandom.current().nextInt(cfg.reconnectJitter + 1)
+                : 0;
+        currentBackoff = (int) Math.min((long) currentBackoff * 2 + jitter, cfg.reconnectMaxDelay);
+
+        if (!scheduler.isShutdown()) {
+            try {
+                scheduler.schedule(() -> {
+                    try { reconnect(); } catch (Exception e) {
+                        log.warning("Reconnect attempt failed: " + e.getMessage());
+                    }
+                }, delay, TimeUnit.SECONDS);
+            } catch (RejectedExecutionException ignored) {
+                // scheduler was shut down between the isShutdown() check and schedule() —
+                // this is fine; it means disconnect() was called intentionally.
+            }
+        }
+    }
+
+    @Override
+    public void onError(Exception ex) {
+        log.warning("Relay connection error: " + ex.getMessage());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Player connection management
+
     private void openPlayerConnection(String connId) {
-        // Enforce the connection cap before spending a thread. A reused connId is
-        // allowed to replace its stale local connection without consuming a new slot.
         PlayerConn old = connections.get(connId);
-        if (old == null && connections.size() >= MAX_CONNECTIONS) {
-            log.warning("Connection cap (" + MAX_CONNECTIONS + ") reached: refusing " + connId);
+        if (old == null && connections.size() >= cfg.maxConnections) {
+            log.warning("Connection cap (" + cfg.maxConnections + ") reached: refusing " + connId);
             sendClose(connId);
             return;
         }
 
-        // Register the connection slot immediately so that client data arriving
-        // before the local socket finishes connecting is buffered, not dropped.
+        // Register the slot immediately so relay data arriving before the local
+        // socket finishes connecting is buffered rather than dropped.
         final PlayerConn pc = new PlayerConn();
         old = connections.put(connId, pc);
-        if (old != null) {
-            teardown(old, true);
-        }
+        if (old != null) teardown(old, true);
+
+        totalConnections.incrementAndGet();
 
         try {
             ioPool.execute(() -> runPlayerConnection(connId, pc));
@@ -190,11 +284,14 @@ public class RelayClient extends WebSocketClient {
         Socket socket = new Socket();
         try {
             synchronized (pc) {
-                if (pc.state == State.CLOSED) return;
+                if (pc.state == State.CLOSED) {
+                    closeQuietly(socket); // FIX: don't leak an unconnected socket
+                    return;
+                }
                 pc.socket = socket;
             }
 
-            socket.connect(new InetSocketAddress(serverHost, serverPort), LOCAL_CONNECT_TIMEOUT_MS);
+            socket.connect(new InetSocketAddress(cfg.serverHost, cfg.serverPort), LOCAL_CONNECT_TIMEOUT_MS);
             if (!isOpen()) {
                 connections.remove(connId, pc);
                 teardown(pc, false);
@@ -202,8 +299,9 @@ public class RelayClient extends WebSocketClient {
                 return;
             }
 
-            // Attach the socket and flush buffered bytes outside pc's monitor.
-            // Later relay frames keep buffering until the backlog is fully drained.
+            // Attach the output stream and flush any bytes that arrived while we
+            // were connecting. Repeat until no bytes remain (relay may keep pushing
+            // while we drain), then flip state to OPEN.
             OutputStream out = socket.getOutputStream();
             while (true) {
                 byte[][] buffered;
@@ -218,17 +316,20 @@ public class RelayClient extends WebSocketClient {
                         break;
                     }
                 }
-
-                for (byte[] b : buffered) out.write(b);
+                for (byte[] b : buffered) {
+                    out.write(b);
+                    bytesToServer.addAndGet(b.length);
+                }
                 out.flush();
             }
 
-            // Local server -> relay -> client
+            // Local server → relay → client
             InputStream in = socket.getInputStream();
             byte[] buf = new byte[READ_BUFFER_BYTES];
             int n;
             while ((n = in.read(buf)) != -1) {
                 if (!isOpen()) break;
+                bytesFromServer.addAndGet(n);
                 String b64 = Base64.getEncoder().encodeToString(Arrays.copyOf(buf, n));
                 JsonObject frame = new JsonObject();
                 frame.addProperty("type", "data");
@@ -241,7 +342,7 @@ public class RelayClient extends WebSocketClient {
                 }
             }
         } catch (IOException ignored) {
-            // normal close or local server unreachable
+            // Normal close or local server unreachable.
         } finally {
             connections.remove(connId, pc);
             teardown(pc, false);
@@ -249,10 +350,10 @@ public class RelayClient extends WebSocketClient {
         }
     }
 
-    // Relay received data from vanilla client: write to local Minecraft server.
+    /** Client→relay data arriving from the relay: write to the local Minecraft server. */
     private void forwardToServer(String connId, String base64Data) {
         if (base64Data.length() > MAX_FRAME_BASE64_CHARS) {
-            log.warning("Oversized data frame for " + connId + ": dropping connection");
+            log.warning("Oversized data frame for " + connId + " (" + base64Data.length() + " chars): dropping");
             closePlayerConnection(connId, false);
             sendClose(connId);
             return;
@@ -274,7 +375,7 @@ public class RelayClient extends WebSocketClient {
             if (pc.state == State.CLOSED) return;
             if (pc.state == State.CONNECTING) {
                 if (pc.pendingBytes + decoded.length > MAX_PENDING_BYTES) {
-                    overflow = pc;
+                    overflow = pc; // pending buffer full — drop this connection
                 } else {
                     pc.pending.add(decoded);
                     pc.pendingBytes += decoded.length;
@@ -299,6 +400,7 @@ public class RelayClient extends WebSocketClient {
         try {
             out.write(decoded);
             out.flush();
+            bytesToServer.addAndGet(decoded.length);
         } catch (IOException e) {
             closePlayerConnection(connId, pc, false);
             sendClose(connId);
@@ -342,36 +444,27 @@ public class RelayClient extends WebSocketClient {
         send(close.toString());
     }
 
-    @Override
-    public void onClose(int code, String reason, boolean remote) {
-        assignedPort = -1;
-        if (pingTask != null) pingTask.cancel(false);
+    // ---------------------------------------------------------------------------
+    // Public API
 
-        // Tear down any sockets left over from this session.
-        closeAllConnections();
-
-        log.warning("Disconnected from relay (" + reason + "). Reconnecting in 10s...");
-
-        if (!scheduler.isShutdown()) {
-            scheduler.schedule(() -> {
-                try { reconnect(); } catch (Exception e) {
-                    log.warning("Reconnect failed: " + e.getMessage());
-                }
-            }, 10, TimeUnit.SECONDS);
+    /** Force an immediate reconnect, resetting the backoff counter. */
+    public void reconnectNow() {
+        currentBackoff          = cfg.reconnectBaseDelay;
+        suppressDisconnectEvent = true; // don't kick players for a manual reconnect
+        if (isOpen()) {
+            close();
+            // onClose will schedule the reconnect attempt
+        } else {
+            suppressDisconnectEvent = false;
+            try { reconnect(); } catch (Exception e) {
+                log.warning("Reconnect failed: " + e.getMessage());
+            }
         }
     }
 
-    @Override
-    public void onError(Exception ex) {
-        log.warning("Relay connection error: " + ex.getMessage());
-    }
-
-    public int     getAssignedPort()  { return assignedPort; }
-    public boolean isReady()          { return assignedPort != -1; }
-    public boolean isConnected()      { return isOpen(); }
-    public String  getPublicAddress() { return publicHost + ":" + assignedPort; }
-
+    /** Permanent shutdown — stops all threads and closes the WebSocket. */
     public void disconnect() {
+        suppressDisconnectEvent = true;
         if (pingTask != null) pingTask.cancel(false);
         scheduler.shutdownNow();
         ioPool.shutdownNow();
@@ -380,13 +473,22 @@ public class RelayClient extends WebSocketClient {
     }
 
     private void closeAllConnections() {
-        for (PlayerConn pc : connections.values()) {
-            teardown(pc, false);
-        }
+        for (PlayerConn pc : connections.values()) teardown(pc, false);
         connections.clear();
     }
 
-    // --- helpers -----------------------------------------------------------
+    public int     getAssignedPort()      { return assignedPort; }
+    public boolean isReady()              { return assignedPort != -1; }
+    public boolean isConnected()          { return isOpen(); }
+    public String  getPublicAddress()     { return cfg.publicHost + ":" + assignedPort; }
+    public int     getActiveConnections() { return connections.size(); }
+    public long    getTotalConnections()  { return totalConnections.get(); }
+    public long    getBytesFromServer()   { return bytesFromServer.get(); }
+    public long    getBytesToServer()     { return bytesToServer.get(); }
+    public long    getLatencyMs()         { return latencyMs; }
+
+    // ---------------------------------------------------------------------------
+    // Helpers
 
     private static String optString(JsonObject o, String key) {
         return (o.has(key) && o.get(key).isJsonPrimitive()) ? o.get(key).getAsString() : null;

@@ -1,9 +1,11 @@
 # VoxelPort Plugin Config
 # Get your server token from the VoxelPort Discord bot with /gettoken
 
+# ---------------------------------------------------------------------------
+# Connection
+
 # Secure WebSocket address of the VoxelPort relay (wss:// = encrypted).
-# Only use ws:// (unencrypted) for local testing — never over the internet,
-# because your token would travel in plaintext.
+# Only set allow-insecure-ws: true if you need ws:// for local testing.
 relay-ws: wss://voxelport.in
 
 # Your server token — get one from the VoxelPort Discord with /gettoken.
@@ -14,6 +16,42 @@ server-token: YOUR_TOKEN_HERE
 # The public address players type into Minecraft (shown by /voxelport status).
 public-host: play.voxelport.in
 
-# The local Minecraft server this plugin proxies traffic to
+# The local Minecraft server this plugin proxies traffic to.
 server-host: localhost
 server-port: 25565
+
+# Allow ws:// (unencrypted) relay connections. Never enable this over the
+# internet — your token will travel in plaintext. Local testing only.
+allow-insecure-ws: false
+
+# ---------------------------------------------------------------------------
+# Connection limits (keep max-connections in sync with relay --max-conns)
+
+max-connections: 200
+
+# ---------------------------------------------------------------------------
+# Reconnect backoff
+# On each failed attempt the delay doubles (base → base*2 → base*4 …) up to
+# max, with up to jitter seconds of random spread to avoid reconnect storms.
+
+reconnect-base-delay-seconds: 10
+reconnect-max-delay-seconds: 300
+reconnect-jitter-seconds: 5
+
+# ---------------------------------------------------------------------------
+# Player disconnect behaviour
+
+# When the relay drops unexpectedly, kick online players so they see a proper
+# disconnect screen instead of hanging. Disable if you run BungeeCord/Velocity
+# and want the proxy to handle reconnection.
+kick-players-on-disconnect: true
+
+# Kick message (supports & colour codes).
+kick-message: "&cServer relay disconnected — please reconnect."
+
+# ---------------------------------------------------------------------------
+# Discord webhook (optional)
+# VoxelPort will POST here when the relay connects or disconnects.
+# Leave empty to disable.
+
+discord-webhook-url: ""
