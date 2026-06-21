@@ -203,7 +203,7 @@ plugins/VoxelPort/config.yml
 
 Join the VoxelPort Discord and run:
 
-https://discord.gg/Fbqx76j5US
+https://discord.com/invite/5Q6BRnJYHW
 
 ```text
 /gettoken
@@ -516,7 +516,7 @@ or restart the server cleanly.
 
 Use the VoxelPort Discord for tokens, support, updates, and bug reports:
 
-https://discord.gg/Fbqx76j5US
+https://discord.com/invite/5Q6BRnJYHW
 
 When asking for help, include:
 
